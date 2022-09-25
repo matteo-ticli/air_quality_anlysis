@@ -1,0 +1,560 @@
+---
+title: "20236 Time Series Analysis: Final Project"
+author:
+    - Group 7 
+    -
+    - Stefano Pacifico (3185497)
+    - Matteo Ticli (3077833)
+date: "Spring 2022"
+output: pdf_document
+fig_caption: yes
+header-includes: 
+  - \renewcommand{\and}{\\}
+  - \usepackage{float}
+  - \floatplacement{figure}{H}
+---
+
+
+
+### Analysis of Pollution Level Dynamics in the US West Coast
+In the course of this analysis, we are going to try to model the dynamics of air pollution, using hourly air quality data from the U.S. Environmental Protection Agency. The data refers to 10 stations located along the U.S. West Coast and was collected during the summer of 2020. The data provided is collected hourly over the time frame of four months.
+In particular, we are going to focus on the levels of PM2.5, that is, particulate matter of diameter 2.5 micrometers or less. The study of this kind of particulate matter is of great importance for human health, as high levels of pollution have been linked to respiratory diseases and also to more severe Covid-19 outcomes.
+We carry out the analysis using different models and approaches, that may be useful in answering several policy-relevant questions.
+
+```{r setup, echo=F, message=F, warning=F}
+knitr::opts_chunk$set(message = FALSE,
+                      results = FALSE,
+                      warning = FALSE,
+                      echo = FALSE,
+                      fig.align = "center",
+                      fig.show = "hide",
+                      fig.pos = "H")
+
+set.seed(42)
+#libraries
+library(depmixS4)
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(rgeos)
+library(ggrepel)
+library(tidyverse)
+library(ggplot2)
+library(psych)
+library(knitr)
+library(tseries)
+library(dlm)
+library(geosphere)
+theme_set(theme_bw())
+```
+
+### Descriptive Analysis
+The first stage is to carry out a descriptive analysis of the data. To this end, it is useful to plot the data for PM2.5 and to comment on the characteristics of this time series. The plot is reported in Figure \ref{fig:df_95_pm25}. For this purpose, we take under consideration station 95; notice that similar considerations would hold for other stations too, since all of them show  similar behavior. We will use data from station 95 also in defining the models discussed later on.
+```{r, message= F, warning= F, out.width = '56%', fig.align = "center", echo=FALSE, results=FALSE, fig.show='hold', fig.cap="\\label{fig:df_95_pm25} PM2.5 data for station 95"}
+dat <- read_csv("ts_epa_2020_west_sept_fill.csv", col_types = cols(temp = col_double(), wind = col_double()))
+
+df_95 = dat[which(dat$station_id==95), ]
+
+plotdata <- df_95 %>% dplyr::filter(station_id == 95)
+
+plotdata %>% 
+  ggplot() + 
+  #ggtitle("PM2.5 levels at Station #95") +
+  geom_rect(data=data.frame(xmin=min(plotdata$datetime), xmax=max(plotdata$datetime), ymin=25, ymax=max(plotdata$pm25)),
+            aes(xmin=xmin, xmax=xmax, ymin=ymin, ymax=ymax), fill="grey", alpha=.4) +
+  annotate(geom="text", x=as.POSIXct("2020-06-25 23:00:00 UTC"), y=75, label="Dangerous PM2.5 level Area", color="dark grey") +
+  geom_line(data=plotdata, aes(x=datetime, y=pm25)) + 
+  geom_hline(yintercept=25, color="dark grey") + 
+  scale_x_datetime(expand=c(0,0)) +
+  scale_y_continuous(expand=c(0,0)) +
+  labs(x=NULL, y=NULL)+
+  xlab("Days")+
+  ylab("PM2.5 Level")
+```
+We can see from the plot that there is great variability in the observations. In particular, for the first two months the level of pollution moves around a lower level compared to that observed in the last two months. Moreover, the variance of the level of pollution greatly increases in the second half of the observation period: this is evident from the high peaks shown in the graph. This is likely related to the start of the wildfire season, which has the effect (as it is fair to assume) of increasing air pollution.
+We will need to keep these considerations in mind in carrying out our analysis.
+
+
+Here we present the summary statistics of the data:
+```{r, echo=FALSE, results=TRUE}
+
+dat_trimmed <- subset(df_95, select = -c(time_n, station_id, datetime, Longitude, Latitude))
+
+locations <- data.frame("Longitude" = unique(dat$Longitude), "Latitude" = unique(dat$Latitude), labels = 1:10)
+Stations <- st_as_sf(locations, coords = c("Longitude", "Latitude"),crs = 4326)
+
+kable(summary(dat_trimmed), format="pipe", digits = 2, align = 'c', longtable=TRUE, caption="Summary Statistics Station 95")
+```
+Looking in a more rigorous way at the data, we report here the most relevant summary statistics. In particular it is possible to see that the average (hourly) pollution level is 17.91 micrograms per cubic meter, which is below the suggested limit. Moreover, more than 75% of the observations display a PM2.5 level below the 25 micrograms limit. In any case, we also see that there are very large peaks, up to 103.31. 
+It is relevant to notice that the maximum observation among all stations for which we have data is 307.81.
+
+### First Model
+After this first description of the data, we can move to analyze its dynamics using various models and techniques. In the first section of the report, we analyze station 95, reducing the number of records at our disposal, with respect to the degree of air pollution. We aim at identifying levels of pollution that can opportunely cluster observations relative to the PM2.5 present in the air. We can see in Figure \ref{fig:df_95_pm25} that there is great variability in the observations. In particular, for the first two months the level of pollution moves around a lower level compared to that observed in the last two months. Moreover, the variance of the level of pollution greatly increases in the second half of the observation period: this is evident from the high peaks shown in the graph. This is likely related to the start of the wildfire season, that has the effect (as it is fair to assume) of increasing air pollution.
+
+```{r, results=FALSE}
+df_95_pm_temp_wind = df_95[,6:8]
+df_95_cor = cor(df_95_pm_temp_wind)
+tab_corr = kable(df_95_cor, format="pipe", digits = 4, align = 'c', longtable=TRUE, caption="Correlation matrix of most important variables")
+tab_corr
+```
+
+The first question that we try to answer is: can we define different levels of pollution (and associated instability), in order to guide the needed interventions by the decision-makers? Moreover, can we quantify the probability that a high level of pollution will remain such in the next hour, and the probability that pollution will decrease in the next few hours?
+For this purpose, we have defined a model that divides the observations into three main states: low pollution, normal pollution and high pollution. In particular, this is an Hidden Markov Model (from now on, HMM). 
+Below is presented the structure of the model: 
+$$ \begin{cases}
+\ Y_t= \mu_1 + \epsilon_t, \quad \epsilon_t \sim\mathcal{N}(0, \sigma^2_1), \quad \textrm{if} \quad S_t = 1 \\
+\ Y_t= \mu_2 + \epsilon_t, \quad \epsilon_t \sim\mathcal{N}(0, \sigma^2_2), \quad \textrm{if} \quad S_t = 2 \\
+\ Y_t= \mu_3 + \epsilon_t, \quad \epsilon_t \sim\mathcal{N}(0, \sigma^2_3), \quad \textrm{if} \quad S_t = 3 \\
+\end{cases} $$
+So, we estimated the relevant parameters of this model using maximum likelihood estimators($\mu_t$ and $\sigma^2_t$ for $t=1,2,3$), that is, using estimates that best fit the observed data.
+In table 2 we report the estimates for the 3 states' parameters. In particular, for each of them we report the expected pollution level together with the associated instability. Notably, we see that only 1 state (state 3) has an expected pollution level above the suggested pollution limit.
+We decided to define three states because it allows us to have a parsimonious specification and, at the same time, to describe with satisfactory precision the data observed.
+
+```{r, message= F, warning= F, out.width = '75%', fig.align = "center", fig.show='hide', results= FALSE}
+## estimation of the data relative to pm25 with three states
+y <- as.numeric(df_95$pm25)
+model <- depmix(y~1, data=data.frame(y), nstates=3)
+f_model = fit(model)
+#summary(f_model)
+
+estStates <- posterior(f_model)
+
+## identify transition probability matrix
+transition_mat <- rbind(getpars(getmodel(f_model,"transition",1)),getpars(getmodel(f_model,"transition",2)), getpars(getmodel(f_model,"transition",3)))
+rownames(transition_mat) <- c("fromS1", "fromS2", "fromS3")
+colnames(transition_mat) <- c("toS1", "toS2", "toS3")
+
+## identify response matrix
+response_param <- rbind(getpars(getmodel(f_model,"response",1)),getpars(getmodel(f_model,"response",2)), getpars(getmodel(f_model,"response",3)))
+rownames(response_param) <- c("S1", "S2", "S3")
+colnames(response_param) <- c("mean", "sd")
+
+i= estStates[1,1]
+ii= if(i==1){i+1} else if(i == 2) {i-1} else if(i == 3) {i-1} else {i-1}
+iii= if(i==1){i+2} else if(i == 2) {i+1} else if(i == 3) {i-2} else {i-2}
+
+estMean1=f_model@response[[i]][[1]]@parameters$coefficients
+estMean2=f_model@response[[ii]][[1]]@parameters$coefficients
+estMean3=f_model@response[[iii]][[1]]@parameters$coefficients
+
+estMeans=rep(estMean1, length(df_95$pm25))
+estMeans[estStates[,1]==ii]=estMean2
+estMeans[estStates[,1]==iii]=estMean3
+```
+
+```{r, message= F, warning= F, out.width = '70%', fig.align = "center", fig.show='hold', results= TRUE}
+kable(response_param, format="pipe", digits = 4, align = 'c', longtable=TRUE, caption="Response param Mat of HMM with three state")
+```
+In Figure \ref{fig:hmm_95}, we plot the data together with the estimated states at each observation. As it is fair to expect, we can see that state 3 is associated with periods of high pollution. However, we observe that some datapoints were misclassified: they were incorporated with the observations above the maximum threshold (above 25 micrograms per cubic meter) of PM in the air being nonetheless under the critical level.
+
+```{r, message= F, warning= F, out.width = '60%', fig.align = "center", echo=FALSE, results=FALSE, fig.show='hold', fig.cap="\\label{fig:hmm_95} PM2.5 levels at Station 95 estimated with a three states HMM"}
+plotdata <- df_95
+
+plotdata %>% 
+  ggplot() + 
+  #ggtitle("PM2.5 levels at Station #95 estimated with a three states HMM") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  geom_rect(data=data.frame(xmin=min(plotdata$datetime), xmax=max(plotdata$datetime), ymin=25, ymax=max(plotdata$pm25)),
+            aes(xmin=xmin, xmax=xmax, ymin=ymin, ymax=ymax), fill="grey", alpha=.4) +
+  annotate(geom="text", x=as.POSIXct("2020-06-25 23:00:00 UTC"), y=75, label="Dangerous PM2.5 level Area", color="dark grey") +
+  geom_line(data=df_95, aes(x=datetime, y=pm25)) + 
+  geom_hline(yintercept=25, color="grey") +
+  geom_point(data = NULL, aes(x=datetime, y=estMeans), alpha=0.5, color='red', size=0.3)+
+  scale_x_datetime(expand=c(0,0)) +
+  scale_y_continuous(expand=c(0,0)) +
+  labs(x=NULL, y=NULL)+
+  xlab("Days")+
+  ylab("PM2.5 Level")
+```
+One major advantage of this model is that it allows us to quantify the probability of switching between different states. We report the estimates of these probabilities in Table 3. In other words, we can quantify the probability of moving from different pollution levels and this indication is important, because it can suggest the expected level of pollution and so can guide the actions of policy-makers. For instance, in the station under analysis, we can conclude that the hourly pollution level is most likely to remain in the same state after one period; this is consistent with the high frequency of the observations, as it is unlikely to have abrupt changes in the level of pollution in the course of one hour. However, we can also conclude that in the time frame of a few hours, the probability of remaining in a high state of pollution drops significantly. 
+```{r, message= F, warning= F, out.width = '70%', fig.align = "center", fig.show='hold', results= TRUE}
+kable(transition_mat, format="pipe", digits = 4, align = 'c', longtable=TRUE, caption="Trans Prob Mat of HMM with three states")
+```
+
+The model just presented is useful for the reasons explained above; however, one major drawback is that it does not allow to make precise one-step-ahead forecasts. In other words, it does not give a precise indication of what pollution level we should expect in the next hour.
+
+### Second Model
+In order to answer more precisely to this other question, we defined a different model, that links each observation only to a state $\theta$ and observations are independent among them given the state parameter. As in the previous model, the state depends only on the one in the previous period and adds to it a random error. More precisely, we defined a Dynamic Linear Model (DLM from now on) using a random walk plus noise model:
+
+$$ \begin{cases}
+\ Y_t= \theta_t + v_t, \quad & v_t \sim\mathcal{N}(0, \sigma^2_v) \\
+\ \theta_t= \theta_{t-1} + w_t, \quad & w_t \sim\mathcal{N}(0, \sigma^2_w) \\
+\end{cases} $$
+
+With the standard assumption of: $\theta_0 {\perp \!\!\! \perp} (v_t){\perp \!\!\! \perp} (w_t)$. We set as initial value for the parameter $\theta_0$ the first observation of the PM2.5 series. We assume that the initial value is independent from the errors terms. Moreover, the error terms for the observation equation and the state equation are independent among them. Most notably, we are assuming that the variances will remain constant throughout the series; this is a strong assumption given the data, nonetheless necessary to define the model. 
+
+The main advantage of this model is that it allows to make online estimation and prediction, exploiting the streaming nature of the data available; in fact, given that data are coming in quite frequently (hourly), it makes sense to produce one-step-ahead forecasts based on the previous observation.
+Below, we report the estimates of the parameters of the model (the variance of the observation error and that of the state error), together with the associated uncertainty (i.e., their variance).
+
+```{r, message= F, warning= F, out.width = '70%', fig.align = "center", fig.show='hold', results= TRUE}
+#Here I have extracted the data for station 95
+
+station95 <- subset(dat, station_id==95)
+
+#Here I proceed in finding the daily average for station 95. Then, I fit
+#a model as suggested by the professor; in particular
+
+list.station95 <- c(station95$pm25)
+
+dailyaverage.station95<- colMeans(matrix(list.station95, nrow=24))
+```
+
+```{r, message= F, warning= F, out.width = '70%', fig.align = "center", fig.show='hold', results= TRUE}
+## we build a simple model considering only station 95
+## the data used are the hourly observations
+## the model's parameters of variances of the error terms are unknown
+
+model_95_h <- function(param){
+dlmModPoly(order = 1, dV=param[1], dW=param[2], m0=station95$pm25[1])
+}
+
+## given the fact that we have unknown parameters, we estimate them using MLEs
+## we also compute the standard deviations
+
+outMLE_h <- dlmMLE(station95$pm25, parm = c(1,1), build = model_95_h, lower=c(0.000001, 0.000001), hessian=TRUE)
+
+asymptotic_cov_h <- solve(outMLE_h$hessian)
+sqrt_MLE_h <- sqrt(diag(asymptotic_cov_h))
+
+MLE_sd_h_table <- data.frame(outMLE_h$par, sqrt_MLE_h)
+colnames(MLE_sd_h_table) <- c("MLE", "sd")
+rownames(MLE_sd_h_table) <- c("param 1", "param 2")
+kable(MLE_sd_h_table, format="pipe", digits = 4, align = 'c', longtable=TRUE, caption="MLEs and standard deviation for DLM with hourly data")
+```
+Where param 1 is $\sigma^2_v$ and param 2 is $\sigma^2_w$.
+
+```{r, message= F, warning= F, out.width = '70%', fig.align = "center", fig.show='hide', results= F}
+
+## here we compute the forecast of the model using the daily means
+## we first compute the filtering distribution and then we compute the one step ahead forecast
+
+model_forecast_h <- model_95_h(outMLE_h$par)
+out_model_forecast_h <- dlmFilter(y = station95$pm25, mod = model_forecast_h)
+
+filterEst_h <- dropFirst(out_model_forecast_h$m)
+
+state_est_h <- unlist(dropFirst(out_model_forecast_h$m))
+
+listQ_h <- dlmSvd2var(out_model_forecast_h$U.R, out_model_forecast_h$D.R)
+sqrtQ_h <- sqrt(unlist(listQ_h))
+one_step_forecast_h <- unlist(out_model_forecast_h$f)
+
+## here we collect the forecasts and the real observations for plotting purposes
+## we also compute the standard errors in order to make nice plots
+
+number_h <- station95$datetime
+
+df_collect_forecast_h <- data.frame(number_h, one_step_forecast_h, station95$pm25)
+
+t_score_h <- qt(p=0.025, df=length(number_h)-1, lower.tail=F)
+
+margin_error <- dropFirst(t_score_h*sqrtQ_h)
+lower_bound <- filterEst_h - margin_error
+upper_bound <- filterEst_h + margin_error
+```
+
+```{r, message= F, warning= F, out.width = '60%', fig.align = "center", echo=FALSE, results=FALSE, fig.show='hold', fig.cap="\\label{fig:forecast_95_hourly} Station 95 hourly data of PM2.5 levels with respect to its one-step-ahead forecast"}
+## the following is the plot of the the daily means for the observations of PM2.5 and the forecast sample
+ggplot(df_collect_forecast_h, aes(number_h, one_step_forecast_h)) +
+  geom_line(col='red') +
+  geom_point(col='red', type='o', lty=2, pch=4) +
+  geom_ribbon(aes(ymin = lower_bound, ymax = upper_bound),fill='red', alpha = 0.2) +
+  geom_line(y= df_collect_forecast_h$station95.pm25, type='o', col="black") +
+  expand_limits(y=c(5, 52)) +
+  geom_hline(yintercept=25, color="grey")+
+  annotate(geom="text", x=number_h[300], y=32, label="Dangerous PM2.5 level", color='dark grey') +
+  xlab("Days")+
+  ylab("PM2.5 Level")
+```
+In Figure \ref{fig:forecast_95_hourly} we represent the PM2.5 hourly observations (in black) and the one-step-ahead forecast (in red); the shaded area in red is the 95% confidence interval of the forecast. We can see that the performance of our model is somewhat disappointing: in fact, the one-step ahead forecasts obtained using the hourly observation with the DLM stated above mimic the just occurred observation. This problem arises from the impossibility of correctly estimating the variance for the error term ($\sigma^2_v$) of the observation equation: since hourly data are very noisy and irregular, the maximization algorithm fails in estimating correctly this parameter; indeed we obtain a value very close to zero, which doesn't seem reasonable looking at the data. Deep diving into a more statistical framework, the signal-to-noise ratio ($\sigma^2_w/\sigma^2_v$) is really high and this leads to the problem aforementioned. 
+
+To overcome this problem, we used the same model but with the daily averages of the observations for PM2.5 instead of the hourly data. In fact, we expect daily averages to be more stable and less noisy over time; this should help in obtaining more reliable estimates for the model's parameters. From a policy perspective it is fair to assume that the policymakers would undertake decisions on a daily or weekly basis and not on an hourly one, also because the suggested limit for pollution is expressed as a daily mean.
+Below, we report the estimates of the parameters of the model (the variance of the observation error and that of the state error), together with the associated uncertainty (i.e., their variance).
+```{r, message= F, warning= F, out.width = '70%', fig.align = "center", fig.show='hold', results= TRUE}
+## we build a simple model considering only station 95
+## the data used are the daily means observations and NOT the hourly observations
+## the model's parameters of variances of the error terms are unknown
+
+model_95_d <- function(param){
+dlmModPoly(order = 1, dV=param[1], dW=param[2], m0=dailyaverage.station95[1])
+}
+
+## given the fact that we have unknown parameters, we estimate them using MLEs
+
+outMLE_d <- dlmMLE(dailyaverage.station95, parm = c(0,0), build = model_95_d, lower=c(0.000001, 0), hessian=TRUE)
+
+asymptotic_cov_d <- solve(outMLE_d$hessian)
+sqrt_MLE_d <- sqrt(diag(asymptotic_cov_d))
+
+MLE_sd_d_table <- data.frame(outMLE_d$par, sqrt_MLE_d)
+colnames(MLE_sd_d_table) <- c("MLE", "sd")
+rownames(MLE_sd_d_table) <- c("param 1", "param 2")
+kable(MLE_sd_d_table, format="pipe", digits = 4, align = 'c', longtable=TRUE, caption="MLEs and standard deviation for DLM with daily data")
+```
+Where, once again, param 1 is $\sigma^2_v$ and param 2 is $\sigma^2_w$.
+
+```{r, message= F, warning= F, out.width = '70%', fig.align = "center", fig.show='hold', results= TRUE}
+
+## here we compute the forecast of the model using the daily means
+## we first compute the filtering distribution and then we compute the one step ahead forecast
+
+model_forecast_d <- model_95_d(outMLE_d$par)
+out_model_forecast_d <- dlmFilter(y = dailyaverage.station95, mod = model_forecast_d)
+
+filterEst_d <- dropFirst(out_model_forecast_d$m)
+
+state_est_d <- unlist(dropFirst(out_model_forecast_d$m))
+
+listQ_d <- dlmSvd2var(out_model_forecast_d$U.R, out_model_forecast_d$D.R)
+sqrtQ_d <- sqrt(unlist(listQ_d))
+one_step_forecast_d <- unlist(out_model_forecast_d$f)
+
+## here we collect the forecasts and the real observations for plotting purposes
+## we also compute the standard errors in order to make nice plots
+
+days = seq(as.Date("2020-06-01") , as.Date("2020-09-30"), by= "day")
+
+df_collect_forecast_d <- data.frame(days, one_step_forecast_d, dailyaverage.station95)
+
+t_score <- qt(p=0.025, df=length(days)-1, lower.tail=F)
+
+margin_error <- dropFirst(t_score*sqrtQ_d)
+lower_bound_d <- filterEst_d - margin_error
+upper_bound_d <- filterEst_d + margin_error
+```
+
+```{r, message= F, warning= F, out.width = '60%', fig.align = "center", echo=FALSE, results=FALSE, fig.show='hold', fig.cap="\\label{fig:forecast_95_means} Station 95 daily means data of PM2.5 levels with respect to its one-step-ahead forecast"}
+
+## the following is the plot of the the daily means for the observations of PM2.5 and the forecasted sample
+ggplot(df_collect_forecast_d, aes(days, one_step_forecast_d)) +
+  geom_line(col='red') +
+  geom_point(col='red', type='o', lty=2, pch=4) +
+  geom_ribbon(aes(ymin = lower_bound_d, ymax = upper_bound_d),fill='red', alpha = 0.2) +
+  geom_line(y=dailyaverage.station95, type='o', col="black") +
+  expand_limits(y=c(5, 52)) +
+  geom_hline(yintercept=25, color="dark grey")+
+  annotate(geom="text", x=days[20], y=27, label="Dangerous PM2.5 level", color='dark grey') +
+  ylab("PM2.5 Level")
+```
+In Figure \ref{fig:forecast_95_means} we represent the PM2.5 daily means observations (in black) and the one-step-ahead forecast (in red); the shaded area in red is the 95% confidence interval of the forecast. We can evince, first of all that the series is smoother than with hourly observations. As a consequence, the one-step-ahead forecast follow quite well the trend of the series except for periods in which there are high peaks. Still, we have to bear in mind that the assumptions under this model are quite strong, and the results will be valid if the assumptions are respected. 
+
+### Third Model
+After having considered station 95 alone, we decided to consider three stations jointly, in order to take into account the possible correlation among stations located in different places. In fact, pollution is not restricted by any boundary and is likely to move across locations thanks, for instance, to the wind. In other words, the intuition is that, if we observe a high level of PM2.5 in a given station, sooner or later we will observe an increase also in stations nearby.
+```{r, message= F, warning= F, out.width = '70%', fig.align = "center", fig.show='hide', results= F}
+
+## Here, we subset the dataframe for station 97 and 103 as done in the first part of the analysis
+## We also transform the hourly observations into daily means observations for completeness
+
+station97 <- subset(dat, station_id==97)
+station103 <- subset(dat, station_id==103)
+
+list.station97 <- c(station97$pm25)
+list.station103 <- c(station103$pm25)
+dailyaverage.station97 <- colMeans(matrix(list.station97, nrow=24))
+dailyaverage.station103 <- colMeans(matrix(list.station103, nrow=24))
+
+dates <- c(1:122)
+series.dlm <- data.frame(dates, dailyaverage.station95, 
+                         dailyaverage.station97, dailyaverage.station103)
+
+ts.dailyaverage <- as.ts(series.dlm[2:4])
+
+#Now, I move to find the distance between the stations, in order
+#to construct later the variance-covariance matrix.
+
+distance.95.97 <- distGeo(c(station95$Longitude[1], 
+                                       station95$Latitude[1]),
+                         c(station97$Longitude[1], station97$Latitude[1]) )
+distance.95.103 <- distGeo(c(station95$Longitude[1], station95$Latitude[1]),
+                       c(station103$Longitude[1], station103$Latitude[1]) )
+distance.97.103 <- distGeo(c(station103$Longitude[1], station103$Latitude[1]),
+                           c(station97$Longitude[1], station97$Latitude[1]) )
+```
+
+```{r, message= F, warning= F, out.width = '60%', fig.align = "center", echo=FALSE, results=FALSE, fig.show='hold', fig.cap="\\label{fig:3_stations} Daily means of PM2.5 levels for Station 95, 97, 103"}
+plot(days, dailyaverage.station95, type='l' ,col='sienna1', ylab="daily levels of PM2.5")
+lines(days, dailyaverage.station97, type='l', col='springgreen4')
+lines(days, dailyaverage.station103, type='l', col='mediumblue')
+legend("topleft",                          
+       c("Station 95", "Station 97", "Station 103"),
+       lty = 1,
+       col = c("sienna1", "springgreen4", "mediumblue"))
+```
+In Figure \ref{fig:3_stations} we can observe the data relative to the daily average of PM2.5 in station 95, 97, 103. The intuition aforementioned is reinforced by the evidence suggested by the data: the trend of pollutions seems common to all three stations. 
+
+For this reason, we adapted the DLM model used before to accommodate not only the temporal, but also the spatial dimension:
+
+$$ \begin{cases}
+\ Y_{t}= F\theta_t + v_t, \quad & v_t \overset{indep}\sim{N_m}(0, V) \\
+\ \theta_t= G\theta_{t-1} + w_t, \quad & w_t \overset{indep}\sim{N_p}(0, W) \\
+\end{cases} $$
+
+With the assumptions that:
+
+$$\theta_0 {\perp \!\!\! \perp} (v_t){\perp \!\!\! \perp} (w_t)$$
+Now we define the components of the aforementioned model: 
+\[
+Y_t = \begin{bmatrix}
+Y_{t, 95} \\ 
+Y_{t, 97} \\
+Y_{t, 103} \\ 
+\end{bmatrix}
+\]
+which is the vector that holds the observations of PM2.5 for the stations considered,
+
+\[
+\theta_t = \begin{bmatrix}
+\theta_{t, 95} \\ 
+\theta_{t, 97} \\
+\theta_{t, 103} \\ 
+\end{bmatrix}
+\]
+the vector holding the hidden states of the model. 
+
+
+The variance covariance matrix of $v_t$ and $w_t$ are:
+
+\[
+V = \begin{bmatrix}
+\sigma^2_{v,95} & 0 & 0 \\ 
+0 & \sigma^2_{v,97} & 0 \\
+0 & 0& \sigma^2_{v,103} \\ 
+\end{bmatrix}
+\]
+
+\[
+W = \begin{bmatrix}
+\sigma^2 & Cov(w_{95},w_{97}) & Cov(w_{95},w_{103}) \\ 
+Cov(w_{97},w_{95}) & \sigma^2 & Cov(w_{97},w_{103}) \\
+Cov(w_{103},w_{95}) & Cov(w_{103},w_{97}) & \sigma^2 \\ 
+\end{bmatrix}
+\]
+The generic of the $W$ matrix is defined as: $W[i,k] = Cov(w_{j.t}, w_{k,t}) = \sigma^2 \exp(- \phi D[j,k]),  \quad j,k=95,97,103$
+
+Moreover, we define the two weighting matrices $F$ and $G$ which are simply defined as:
+\[
+F,G = \begin{bmatrix}
+1 & 0 & 0 \\ 
+0 & 1 & 0 \\
+0 & 0 & 1 \\ 
+\end{bmatrix}
+\]
+
+
+The spatial dimension has been inserted into the variance-covariance matrix of the error term of the space equation, where we add a covariance term that depends on the distance between stations. We used this model to analyze the dynamics of stations 95, 97 and 103 jointly. 
+Looking at the assumptions that we made, we assumed that the observation errors are independent among them (i.e., their variance-covariance matrix is diagonal) and that each station has a different observation error. We have not been able to estimate correctly the decay parameter that is associated with the distance, hence we fixed this parameter equal to one, in order not to hinder the precision of the other estimates.
+
+
+Below, it is possible to see the estimates of the parameters of the model as done before:
+
+
+```{r, message= F, warning= F, out.width = '70%', fig.align = "center", fig.show='hold', results= TRUE}
+## Now, we define the model as suggested and define the unknown parameters using the MLEs.
+
+distance.matrix <- matrix(c(0, distance.95.97, distance.95.103,
+                            distance.95.97, 0, distance.97.103,
+                            distance.95.103, distance.97.103, 0), ncol=3)
+
+initial.values <- c(log(list.station95[1]), log(list.station97[1]), 
+                    log(list.station103[1]))
+
+## building the model
+
+buildrw <- function(param){
+  mod <- dlmModPoly(1)
+  mod$V <- param[1:3]*diag(3)
+     Wcor <- -distance.matrix
+  mod$W <- param[4]*exp(Wcor)
+  mod$m0 <- exp(initial.values)
+   mod$GG=diag(3)
+   mod$FF=diag(3)
+   return(mod)
+}
+
+## evaluate the MLEs of the unknown parameters and compute their standard deviations
+
+outMLE_st <- dlmMLE(ts.dailyaverage, parm = rep(1, 4), buildrw, lower=c(0.000001,
+                 0.000001, 0.0000001, 0), hessian=TRUE)
+
+asymptotic_cov_st <- solve(outMLE_st$hessian)
+sqrt_MLE_st <- sqrt(diag(asymptotic_cov_st))
+
+MLE_sd_st_table <- data.frame(outMLE_st$par, sqrt_MLE_st)
+colnames(MLE_sd_st_table) <- c("MLE", "sd")
+rownames(MLE_sd_st_table) <- c("param 1", "param 2", "param 3", "param 4")
+kable(MLE_sd_st_table, format="pipe", digits = 4, align = 'c', longtable=TRUE, caption="MLEs and standard deviation for DLM with daily data")
+```
+Where param 1 refers to $\sigma^2_{v, 95}$, param 2 is $\sigma^2_{v, 95}$, param 3 is $\sigma^2_{v, 95}$, param 4 refers to $\sigma^2$.
+
+From the table 6 we can compare the results obtained using the spatio-temporal model with respect to the one presented as single location temporal model. The result for $\sigma^2_{v, 95}$ are almost the same, with a slight decrease in both the expected value and standard deviation of the estimate using the spatio-temporal model. 
+
+```{r, message= F, warning= F, out.width = '70%', fig.align = "center", fig.show='hide', results= F}
+## here we evaluate the model using the MLEs just found
+## we assume the model parameters as known and plug the MLEs directly into the model
+
+build_model_forecast_st <- buildrw(outMLE_st$par)
+out_model_forecast_st <- dlmFilter(y = ts.dailyaverage, mod = build_model_forecast_st)
+
+filterEst_st <- dropFirst(out_model_forecast_st$m)
+
+state_est_st <- unlist(dropFirst(out_model_forecast_st$m))
+
+listQ_st <- dlmSvd2var(out_model_forecast_st$U.R, out_model_forecast_st$D.R)
+
+station_95_listQ_st <- rep(122, 16.24636)
+sqrtQ_st <- sqrt(unlist(station_95_listQ_st))
+
+one_step_forecast_st <- unlist(out_model_forecast_st$f)
+colnames(one_step_forecast_st) <- c('forecast_station_95', 'forecast_station_97', 'forecast_station_103')
+
+## here we collect daily means forecast data and the daily means observations for the three stations under consideration
+number_st <- c(1:122)
+
+df_collect_forecast_st <- data.frame(days, one_step_forecast_st, ts.dailyaverage)
+
+t_score_st <- qt(p=0.025, df=121, lower.tail=F)
+
+margin_error_st <- dropFirst(t_score_st*sqrtQ_st)
+lower_bound_st <- filterEst_st[,1] - margin_error_st
+upper_bound_st <- filterEst_st[,1] + margin_error_st
+```
+
+Finally, we report in Figure \ref{fig:st_forecast_95_means} the daily means observations of PM2.5 (in black) and the one-step-ahead forecasts (in red) using the spatio-temporal model just defined. We do not report the confidence intervals in this case since we were not able to retrieve the standard errors of the forecasts from the model.
+
+```{r, message= F, warning= F, out.width = '60%', fig.align = "center", echo=FALSE, results=FALSE, fig.show='hold', fig.cap="\\label{fig:st_forecast_95_means} Station 95 daily means of PM2.5 levels with respect to its one-step-ahead forecast (spatio-temporal model)"}
+## we finally plot the foretasted data for station 95 and the respective daily means
+## keep in mind that this analysis is done using contemporaneously the data of the other stations, 
+## this is why the forecasts are slightly different
+
+ggplot(df_collect_forecast_st, aes(days, forecast_station_95)) +
+  geom_line(col='red') +
+  geom_point(col='red', type='o', lty=2, pch=4) +
+  geom_line(y=dailyaverage.station95, type='o', col="black") +
+  expand_limits(y=c(5, 52)) +
+  geom_hline(yintercept=25, color="dark grey")+
+  annotate(geom="text", x=days[20], y=27, label="Dangerous PM2.5 level", color='dark grey') +
+  ylab("PM2.5 Level")
+```
+We can see that results collected in Table 7 are not so different from the one obtained from the simple DLM model used before (no spatio-temporal). To see whether this intuition is sustained by statistical evidence, we computed the MAPE and the MSE for both models and indeed, the spatio-temporal model has lower forecast performance. Nonetheless, the difference is quite small as we can see from the table below: 
+```{r, message= F, warning= F, out.width = '70%', fig.align = "center", fig.show='hide', results= TRUE}
+mape_d = mean(abs(dailyaverage.station95 - filterEst_d)/dailyaverage.station95)
+mape_d_st = mean(abs(dailyaverage.station95 - filterEst_st)/dailyaverage.station95)
+
+mse_d = mean((dailyaverage.station95 - filterEst_d)^2)
+mse_d_st = mean((dailyaverage.station95 - filterEst_st)^2)
+
+eval_metrics <- data.frame(c(0,0), c(0,0))
+eval_metrics[1,1] = mape_d*100
+eval_metrics[2,1] = mape_d_st*100
+eval_metrics[1,2] = mse_d
+eval_metrics[2,2] = mse_d_st
+
+colnames(eval_metrics) <- c("MAPE %", "MSE")
+rownames(eval_metrics) <- c("DLM 1", "DLM 2")
+kable(eval_metrics, format="pipe", digits = 4, align = 'c', longtable=TRUE, caption="Evaluation metrics of the models")
+```
+Where DLM 1 is the simple DLM model while DLM 2 is the spatio-temporal one. 
+
+All in all, we can conclude that it is not wise to use the spatio-temporal model since we have a lower precision at the expense of estimating more parameters, incurring in a higher risk of misspecification. It makes sense to stick to a more parsimonious specification such as the one of the simple DLM. In general, the data under analysis represents a complex case study because it displays high variability induced by unpredictable events such as wildfires. 
+
+
