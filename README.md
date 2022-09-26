@@ -1,2 +1,14 @@
-# air_quality_anlysis
-Dynamic linear models for California air quality analysis. 
+# air_pollution
+The repository is created to host the final project of the course 20236 - Time Series Analysis at Bocconi University (Milan, IT). The task is to analyze the air quality of California during the summer of 2020. The analysis consists of a proposal of dynamic linear models to estimate the air quality and its hidden dynamics. The aim is to propose a model that can support policymakers in undertaking decisions and preventing the outburst of pollution in the State of California. Even though the main driver of the project is merely for educational purposes, it was an interesting assignment, using real-world data and modern statistical techniques for social analysis. If the models are properly calibrated and further elaborated could also be deployed on a real simulation and forecast. We did our best and invested a plethora of effort in the realization of the project.
+
+## First model
+We firstly reduce the panel dataset at our disposal by selecting only one individual from the longitudinal study poulation. We represent the time series with meaningful plots and corroborate the study with descriptive analysis to gain substantial knowledge from the data at our disposal. We further advance the claim by proposing levels for the data associated with transition probabilities from one state to another, following the theory relative to Hidden Markov Models (HMM). HMM is a peculiar linear model that sectorises the data per clusters of the variable of interest.
+
+## Second model
+The second part of the undertaking consists in creating a model that can make a precise one-step ahead forecast, which generally is the main aim of time series analysis. To this aim, we develop a dynamic linear model (DLM) that links observations to a state of the world θ. Therefore, the parameter θ becomes the main driver of the series. This model encapsulates the hidden dynamics of θ in the principal equation of the actual observations. It makes realisations being state-dependent but independent from the previous ones. This peculiar inferential statistics conclusion brings on robust and fascinating dynamics, exploited to deploy sophisticated models.
+
+## Third model
+After having proposed the first two models only relative to one location of interest, we develop at last, a spatio-temporal DLM, able to account for correlations among different individuals of the longitudinal study. One claim that could help strenghten our hypothesis is that the pollution moves freely, it is not restricted just to one precise location resulting in a more reasonable calibrated model. 
+
+## Conclusions
+The results are quit promising. The model best suited for this analysis was the single individual DLM. It is able to score a better MSE and MAPE with respect to the spatio-temporal one, even though the results are not significantly different. We believe that with more data and higher computational power, we could lower the spatio-temporal forecast error and turning it into the best prediction model. Nevertheless, we believe that the rigorousness of the anlays has set an high standard if we would like, in the future, to continue with this topic that has a great deal of significance nowadays. 
